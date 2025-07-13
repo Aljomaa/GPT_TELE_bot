@@ -1,63 +1,57 @@
-# chatgpt.py
-
+import os
 import openai
+import telebot
+from utils.db import is_premium, log_chat_session, get_user_memory, update_user_memory
+from telebot.types import Message
 from config import OPENAI_API_KEY
-from utils.db import (
-    is_premium, is_limited,
-    increment_usage, get_chat_history,
-    save_chat_history
-)
 
 openai.api_key = OPENAI_API_KEY
 
-# ✅ التعامل مع رسالة المستخدم
-def handle_user_chat(bot, msg):
+MAX_FREE_TOKENS = 1000
+MODEL_FREE = "gpt-3.5-turbo"
+MODEL_PREMIUM = "gpt-4o"
+
+# ✅ الرد التفاعلي (مثل ChatGPT)
+def send_typing_effect(bot: telebot.TeleBot, chat_id: int, text: str):
+    try:
+        for i in range(0, len(text), 10):
+            bot.send_chat_action(chat_id, "typing")
+    except:
+        pass
+
+# ✅ معالجة المحادثة مع المستخدم
+def handle_user_chat(bot: telebot.TeleBot, msg: Message):
     user_id = msg.from_user.id
-    user_message = msg.text.strip()
+    text = msg.text.strip()
+    is_user_premium = is_premium(user_id)
 
-    # ✅ التحقق من حالة الاشتراك
-    premium = is_premium(user_id)
-    limited = not premium and is_limited(user_id)
+    model = MODEL_PREMIUM if is_user_premium else MODEL_FREE
 
-    if limited:
-        bot.send_message(user_id, (
-            "❌ لقد وصلت إلى الحد اليومي من الرسائل المجانية.\n\n"
-            "🔓 اشترك في النسخة المميزة للحصول على محادثة غير محدودة مع GPT-4o.\n"
-            "📩 راسل المشرف لتفعيل اشتراكك."
-        ))
-        return
-
-    model = "gpt-4o" if premium else "gpt-3.5-turbo"
+    # ✅ جلب سجل الجلسة السابق من الذاكرة (context)
+    memory = get_user_memory(user_id)
+    memory.append({"role": "user", "content": text})
 
     try:
-        # ✅ تحميل آخر 10 رسائل للمستخدم
-        history = get_chat_history(user_id)[-10:]
-        messages = history + [{"role": "user", "content": user_message}]
+        # ✅ إرسال تفاعل المستخدم (يكتب الآن...)
+        send_typing_effect(bot, msg.chat.id, text)
 
-        # ✅ طلب رد من OpenAI
+        # ✅ طلب إلى OpenAI
         response = openai.ChatCompletion.create(
             model=model,
-            messages=messages,
-            max_tokens=2048,
+            messages=memory,
             temperature=0.7
         )
 
-        reply = response.choices[0].message.content.strip()
+        reply = response.choices[0].message.content
 
-        # ✅ إرسال الرد للمستخدم
-        bot.send_message(
-            user_id,
-            f"🤖 <b>{model.upper()}</b>:\n{reply}",
-            parse_mode="HTML"
-        )
+        # ✅ تحديث الذاكرة + سجل الجلسة
+        memory.append({"role": "assistant", "content": reply})
+        update_user_memory(user_id, memory)
+        log_chat_session(user_id, text, reply)
 
-        # ✅ حفظ المحادثة
-        save_chat_history(user_id, {"role": "user", "content": user_message})
-        save_chat_history(user_id, {"role": "assistant", "content": reply})
-
-        # ✅ تسجيل الاستخدام
-        increment_usage(user_id, type="message")
+        bot.reply_to(msg, reply)
 
     except Exception as e:
-        print(f"[GPT ERROR]: {e}")
-        bot.send_message(user_id, "❌ حدث خطأ أثناء الاتصال بـ GPT. حاول لاحقًا.")
+        bot.reply_to(msg, f"❌ حدث خطأ أثناء المعالجة:
+{e}")
+        
