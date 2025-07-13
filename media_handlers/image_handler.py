@@ -1,9 +1,7 @@
-# media_handlers/image_handler.py
-
 import os
 import uuid
 import requests
-from telebot.types import Message
+from telebot.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import OPENAI_API_KEY
 from utils.db import is_premium, is_limited, increment_usage, log_image_analysis
 from chatgpt import ask_gpt
@@ -16,9 +14,8 @@ TEMP_IMG_FOLDER = "temp_images"
 os.makedirs(TEMP_IMG_FOLDER, exist_ok=True)
 
 def register_image_handler(bot):
-
-    @bot.message_handler(content_types=['photo'])
-    def handle_photo(msg: Message):
+    @bot.message_handler(content_types=['photo', 'document'])
+    def handle_image(msg: Message):
         user_id = msg.from_user.id
 
         # تحقق من حدود الاستخدام
@@ -28,33 +25,32 @@ def register_image_handler(bot):
 
         try:
             bot.send_chat_action(user_id, "upload_photo")
-            file_id = msg.photo[-1].file_id
+
+            # تحميل الصورة سواء أُرسلت كـ photo أو document
+            file_id = msg.photo[-1].file_id if msg.content_type == 'photo' else msg.document.file_id
             file_info = bot.get_file(file_id)
             file_path = file_info.file_path
             img_name = f"{uuid.uuid4().hex}.jpg"
             local_path = os.path.join(TEMP_IMG_FOLDER, img_name)
 
-            # تحميل الصورة
             img_url = f"https://api.telegram.org/file/bot{bot.token}/{file_path}"
             r = requests.get(img_url)
             with open(local_path, 'wb') as f:
                 f.write(r.content)
 
-            # معالجة الصورة
             extracted_text = extract_text_from_image(local_path)
             gpt_response = ask_gpt(user_id, f"صف لي هذه الصورة:\n{extracted_text}")
-
-            # ترجمة الرد إلى العربية إن لم يكن بالعربية
             translated_response = translate_to_arabic_if_needed(gpt_response)
 
-            # تسجيل الاستخدام + السجل
             increment_usage(user_id, "image")
             log_image_analysis(user_id, extracted_text, translated_response)
 
-            # إرسال الرد النصي
-            bot.send_message(user_id, f"🖼️ تحليل الصورة:\n<code>{translated_response}</code>", parse_mode="HTML")
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔁 تحليل مجددًا", callback_data=f"image:reprocess:{img_name}"))
 
-            # توليد صوت من الرد
+            bot.send_message(user_id, f"🖼️ <b>تحليل الصورة:</b>\n<code>{translated_response}</code>", 
+                             parse_mode="HTML", reply_markup=markup)
+
             voice_path = os.path.join(TEMP_IMG_FOLDER, f"{uuid.uuid4().hex}_reply.mp3")
             tts = gTTS(text=translated_response, lang='ar')
             tts.save(voice_path)
